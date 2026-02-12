@@ -1,0 +1,1435 @@
+local PlayerPedId = PlayerPedId
+local GetEntityCoords = GetEntityCoords
+local GetPlayerPed = GetPlayerPed
+local GetPlayerName = GetPlayerName
+local GetPlayerServerId = GetPlayerServerId
+local IsControlJustPressed = IsControlJustPressed
+local IsDisabledControlJustReleased = IsDisabledControlJustReleased
+local Wait = Wait
+
+local KEY_OPEN = 57
+local KEY_STEAL = 115
+
+local blackHoleActive = false
+local rampVehicleActive = false
+local easyHandlingActive = false
+local noClipActive = false
+local noClipSpeed = 1.0
+local noClipSpeeds = {0.5, 1.0, 3.0, 8.0}
+local noClipSpeedIndex = 2
+local noClipEntity = nil
+local function ApplyNoClipVisibility(invisible)
+    local ped = PlayerPedId()
+    if ped and ped ~= 0 then
+        SetEntityVisible(ped, not invisible, false)
+    end
+    if noClipEntity and DoesEntityExist(noClipEntity) and noClipEntity ~= ped then
+        SetEntityVisible(noClipEntity, not invisible, false)
+    end
+end
+local onePunchVehicleActive = false
+local onePunchCooldown = 0
+local onePunchForce = 65.0
+local onePunchUp = 6.0
+local superPunchPlayerActive = false
+local superPunchCooldown = 0
+local superPunchForce = 55.0
+local superPunchUp = 8.0
+local stealVehicleHotkeyActive = false
+local lastOpenPressTime = 0
+local function LoadPersistentSettings()
+    local v = GetResourceKvpInt("naingui_steal_hotkey")
+    stealVehicleHotkeyActive = (v == 1)
+    local md = GetResourceKvpInt("naingui_menu_disabled")
+    if md == 1 then
+        menuDisabled = true
+    end
+end
+LoadPersistentSettings()
+local menuDisabled = false
+local currentTargetPlayer = nil
+local attachedPlayers = {}
+local originalCoords = {}
+
+local menuAlpha = 0.0
+local fadeSpeed = 0.03
+local menuScale = 0.8
+local targetScale = 1.0
+local scaleSpeed = 0.06
+local menuOffsetX = 0.0
+local offsetSpeed = 0.14
+local smoothOptionY = {}
+local highlightY = nil
+local isGoingBack = false
+local backTarget = nil
+
+local UI_COLORS = {
+    background   = {10, 10, 10, 230},
+    highlight    = {40, 140, 80, 160},
+    accent       = {0, 0, 0, 0},
+    accent2      = {0, 0, 0, 0},
+    text         = {240, 240, 240, 255},
+    title        = {210, 210, 210, 255},
+    toggle_on1   = {30, 140, 255, 220},
+    toggle_on2   = {60, 180, 255, 180},
+    toggle_off1  = {60, 60, 70, 160},
+    toggle_off2  = {90, 90, 100, 140},
+    box_border   = {35, 35, 35, 220},
+    banner       = {30, 150, 200, 220},
+    tab_underline= {30, 150, 200, 220},
+}
+
+local UI_FONTS = {
+    option = 6,
+    title = 7
+}
+
+local UI_METRICS = {
+    menu_width = 0.26,
+    option_height = 0.040,
+    option_spacing = 0.036,
+    option_top = 0.093,
+    left_padding = 0.012,
+    status_width = 0.032,
+    status_height = 0.014,
+    corner_radius = 0.005,
+}
+
+local function drawRect(x, y, w, h, r, g, b, a)
+    DrawRect(x, y, w, h, r, g, b, math.floor(a * menuAlpha))
+end
+local function drawBorderRect(x, y, w, h, fr, fg, fb, fa, br, bg, bb, ba)
+    DrawRect(x, y, w, h, fr, fg, fb, math.floor(fa * menuAlpha))
+    local t = 0.0018
+    DrawRect(x - w/2 + t/2, y, t, h, br, bg, bb, math.floor(ba * menuAlpha))
+    DrawRect(x + w/2 - t/2, y, t, h, br, bg, bb, math.floor(ba * menuAlpha))
+    DrawRect(x, y - h/2 + t/2, w, t, br, bg, bb, math.floor(ba * menuAlpha))
+    DrawRect(x, y + h/2 - t/2, w, t, br, bg, bb, math.floor(ba * menuAlpha))
+end
+
+local function drawText(text, x, y, scale, centered, r, g, b, a, font)
+    SetTextFont(font or UI_FONTS.option)
+    SetTextScale(scale, scale)
+    SetTextColour(
+        r or UI_COLORS.text[1],
+        g or UI_COLORS.text[2],
+        b or UI_COLORS.text[3],
+        math.floor((a or UI_COLORS.text[4]) * menuAlpha)
+    )
+    if centered then SetTextCentre(true) end
+    SetTextOutline()
+    BeginTextCommandDisplayText("STRING")
+    AddTextComponentSubstringPlayerName(text)
+    EndTextCommandDisplayText(x, y)
+end
+
+local function drawChamferRect(x, y, w, h, r, cr, cg, cb, ca)
+    local rr = r or UI_METRICS.corner_radius
+    drawRect(x, y, w - 2 * rr, h, cr, cg, cb, ca)
+    drawRect(x - (w / 2 - rr / 2), y, rr, h - 2 * rr, cr, cg, cb, ca)
+    drawRect(x + (w / 2 - rr / 2), y, rr, h - 2 * rr, cr, cg, cb, ca)
+    drawRect(x, y - (h / 2 - rr / 2), w - 2 * rr, rr, cr, cg, cb, ca)
+    drawRect(x, y + (h / 2 - rr / 2), w - 2 * rr, rr, cr, cg, cb, ca)
+end
+
+local function drawNeonOutline(x, y, w, h, r, g, b, a)
+    drawRect(x - w/2 + 0.002, y, 0.002, h, r, g, b, a)
+    drawRect(x + w/2 - 0.002, y, 0.002, h, r, g, b, a)
+    drawRect(x, y - h/2 + 0.002, w, 0.002, r, g, b, a)
+    drawRect(x, y + h/2 - 0.002, w, 0.002, r, g, b, a)
+end
+
+local function drawRoundedRect(x, y, w, h, r, cr, cg, cb, ca)
+    local rr = math.max(0.0, math.min(r or UI_METRICS.corner_radius, math.min(w, h) / 2.0))
+    if rr <= 0.001 then
+        drawRect(x, y, w, h, cr, cg, cb, ca)
+        return
+    end
+    drawRect(x, y, w - 2 * rr, h, cr, cg, cb, ca)
+    drawRect(x - (w / 2 - rr / 2), y, rr, h - 2 * rr, cr, cg, cb, ca)
+    drawRect(x + (w / 2 - rr / 2), y, rr, h - 2 * rr, cr, cg, cb, ca)
+    local N = 8
+    local segH = (2 * rr) / N
+    for i = 0, N - 1 do
+        local yLocal = -rr + (i + 0.5) * segH
+        local xOff = math.sqrt(math.max(0.0, rr * rr - yLocal * yLocal))
+        local stripW = w - 2 * (rr - xOff)
+        local yTop = y - h / 2 + rr + yLocal
+        local yBot = y + h / 2 - rr + yLocal
+        drawRect(x, yTop, stripW, segH, cr, cg, cb, ca)
+        drawRect(x, yBot, stripW, segH, cr, cg, cb, ca)
+    end
+end
+
+local AdminMenu = {}
+local menus = {}
+local keys = {up = 172, down = 173, select = 191, back = 202, tabLeft = 34, tabRight = 51}
+local KEY_DELETE = 178 
+local optionCount = 0
+local currentKey = nil
+local currentMenu = nil
+local smoothY = {}
+local toggleAnim = {}
+local selectAnim = {}
+local prevState = {}
+local toggleBounce = {}
+local toggleBounceTime = {}
+local lastOptionIndex = 1
+local switchSweepStart = 0
+local switchSweepOption = 0
+local topTabs = {
+    {id = 'player_list', label = 'List'},
+    {id = 'safe_menu', label = 'Safe'},
+    {id = 'risky_menu', label = 'Risky'},
+    {id = 'vehicle_menu', label = 'Vehicle'},
+    {id = 'tools_menu', label = 'Triggers'}
+}
+local topTabIndex = 2
+local sweepEnabled = false
+local auditResults = {}
+local auditKeywords = {"anti", "cheat", "anticheat", "ac", "watch", "shield", "guard", "guardian", "protector", "security", "ban", "spectate", "logger"}
+local function scanResources()
+    auditResults = {}
+    local n = GetNumResources()
+    for i = 0, n - 1 do
+        local name = GetResourceByFindIndex(i)
+        if name and type(name) == "string" and #name > 0 then
+            local lower = string.lower(name)
+            local score = 0
+            for _, kw in ipairs(auditKeywords) do
+                if string.find(lower, kw, 1, true) then
+                    score = score + (kw == "anticheat" and 6 or kw == "ac" and 3 or 2)
+                end
+            end
+            if score > 0 then
+                table.insert(auditResults, {name = name, score = score})
+            end
+        end
+    end
+    table.sort(auditResults, function(a, b) return a.score > b.score end)
+end
+local prevState = {}
+local toggleBounce = {}
+local toggleBounceTime = {}
+local lastOptionIndex = 1
+local switchSweepStart = 0
+local switchSweepOption = 0
+
+function AdminMenu.CreateMenu(id, title)
+    menus[id] = {}
+    menus[id].title = title
+    menus[id].visible = false
+    menus[id].x = 0.015
+    menus[id].y = 0.10
+    menus[id].width = UI_METRICS.menu_width
+    menus[id].currentOption = 1
+end
+
+function AdminMenu.CreateSubMenu(id, parent)
+    if menus[parent] then
+        AdminMenu.CreateMenu(id, menus[parent].title)
+        menus[id].previousMenu = parent
+        menus[id].x = menus[parent].x
+        menus[id].y = menus[parent].y
+        menus[id].width = menus[parent].width
+    end
+end
+
+local function setVisible(id, visible)
+    if menus[id] then
+        menus[id].visible = visible
+        if visible then 
+            currentMenu = id 
+            menus[id].currentOption = 1 
+            optionCount = 0 
+            menuScale = 1.0
+            menuAlpha = 1.0
+            menuOffsetX = 0.0
+        end
+    end
+end
+
+function AdminMenu.OpenMenu(id)
+    if menuDisabled then return end
+    setVisible(id, true)
+end
+
+function AdminMenu.IsMenuOpened(id)
+    return menus[id] and menus[id].visible or false
+end
+
+local function applyScale(x, y)
+    local centerX, centerY = 0.5, 0.5
+    local dx, dy = (x - centerX) * menuScale, (y - centerY) * menuScale
+    return centerX + dx, centerY + dy
+end
+
+local function button(text, state)
+    if menus[currentMenu] then
+        optionCount = optionCount + 1
+        local isCurrent = menus[currentMenu].currentOption == optionCount
+
+        local x = menus[currentMenu].x + menus[currentMenu].width / 2
+        local targetY = menus[currentMenu].y + UI_METRICS.option_top + (UI_METRICS.option_spacing * optionCount)
+
+        if not smoothOptionY[optionCount] then 
+            smoothOptionY[optionCount] = targetY 
+        end
+
+        smoothOptionY[optionCount] = smoothOptionY[optionCount] + (targetY - smoothOptionY[optionCount]) * 0.12
+
+        local y = smoothOptionY[optionCount]
+        local w = menus[currentMenu].width
+        local h = UI_METRICS.option_height
+
+        x, y = applyScale(x, y)
+        w, h = w * menuScale, h * menuScale
+        x = x + menuOffsetX
+
+        if highlightY == nil then
+            highlightY = y
+        end
+
+        if isCurrent then
+            highlightY = highlightY + (y - highlightY) * 0.12
+        end
+
+        drawBorderRect(x, y, w, h, UI_COLORS.background[1], UI_COLORS.background[2], UI_COLORS.background[3], 180, UI_COLORS.box_border[1], UI_COLORS.box_border[2], UI_COLORS.box_border[3], UI_COLORS.box_border[4])
+        if currentMenu == 'tools_menu' and optionCount == 1 then
+            drawRect(x, y, w, h, UI_COLORS.banner[1], UI_COLORS.banner[2], UI_COLORS.banner[3], 120)
+        end
+        local now = GetGameTimer()
+        selectAnim[optionCount] = selectAnim[optionCount] or (isCurrent and 1.0 or 0.0)
+        local targetSel = isCurrent and 1.0 or 0.0
+        selectAnim[optionCount] = selectAnim[optionCount] + (targetSel - selectAnim[optionCount]) * 0.08
+        if isCurrent then
+            local pulse = (math.sin(now / 220.0) * 0.5 + 0.5) * 0.1 + 0.9
+            local ha = math.floor(UI_COLORS.highlight[4] * 0.50 * pulse * selectAnim[optionCount])
+            drawRect(x, y, w, h, UI_COLORS.highlight[1], UI_COLORS.highlight[2], UI_COLORS.highlight[3], ha)
+        end
+        if sweepEnabled and switchSweepStart > 0 and switchSweepOption == optionCount then
+            local elapsed = now - switchSweepStart
+            if elapsed < 140 then
+                local p = elapsed / 140.0
+                local barW = 0.012
+                local barX = (x - w/2) + p * w
+                drawRect(barX, y, barW, h, UI_COLORS.highlight[1], UI_COLORS.highlight[2], UI_COLORS.highlight[3], math.floor(UI_COLORS.highlight[4] * 0.6))
+            end
+        end
+        drawText(text, menus[currentMenu].x + UI_METRICS.left_padding, y - 0.012, 0.46, false, UI_COLORS.text[1], UI_COLORS.text[2], UI_COLORS.text[3], UI_COLORS.text[4], UI_FONTS.option)
+
+        if state ~= nil then
+            local statusX = x + w/2 - 0.030
+            local sw = UI_METRICS.status_width
+            local sh = UI_METRICS.status_height
+            local centerX = statusX + sw/2 - 0.004
+            local baseR, baseG, baseB, baseA = UI_COLORS.toggle_off1[1], UI_COLORS.toggle_off1[2], UI_COLORS.toggle_off1[3], UI_COLORS.toggle_off1[4]
+            drawRoundedRect(centerX, y, sw, sh, math.min(sh / 2.0, UI_METRICS.corner_radius * 1.2), baseR, baseG, baseB, baseA)
+            toggleAnim[optionCount] = toggleAnim[optionCount] or (state and 1.0 or 0.0)
+            local target = state and 1.0 or 0.0
+            toggleAnim[optionCount] = toggleAnim[optionCount] + (target - toggleAnim[optionCount]) * 0.20
+            if prevState[optionCount] == nil or prevState[optionCount] ~= state then
+                prevState[optionCount] = state
+                toggleBounceTime[optionCount] = now
+            end
+            local bounceFactor = 0.0
+            if toggleBounceTime[optionCount] then
+                local be = now - toggleBounceTime[optionCount]
+                if be < 120 then
+                    bounceFactor = 1.0 - (be / 120.0)
+                end
+            end
+            local fillW = sw * toggleAnim[optionCount]
+            if fillW > 0.001 then
+                local fillCenterX = centerX - (sw - fillW) / 2
+                local bh = (sh/2) + bounceFactor * 0.003
+                local alphaBoost = math.floor(20 * bounceFactor)
+                local fillR = math.min(bh, fillW) / 2.0
+                drawRoundedRect(fillCenterX, y - sh/4, fillW, bh, fillR, UI_COLORS.toggle_on1[1], UI_COLORS.toggle_on1[2], UI_COLORS.toggle_on1[3], UI_COLORS.toggle_on1[4] + alphaBoost)
+                drawRoundedRect(fillCenterX, y + sh/4, fillW, bh, fillR, UI_COLORS.toggle_on2[1], UI_COLORS.toggle_on2[2], UI_COLORS.toggle_on2[3], UI_COLORS.toggle_on2[4] + alphaBoost)
+            end
+        end
+        if isCurrent and currentKey == keys.select then
+            currentKey = nil
+            return true
+        end
+    end
+    return false
+end
+
+local function title()
+    if menus[currentMenu] then
+        local x = menus[currentMenu].x + menus[currentMenu].width / 2
+        local y = menus[currentMenu].y + 0.045
+
+        x, y = applyScale(x, y)
+        local w = menus[currentMenu].width * menuScale
+        local h = 0.08 * menuScale
+        x = x + menuOffsetX
+
+        drawRect(x, y, w, h, UI_COLORS.banner[1], UI_COLORS.banner[2], UI_COLORS.banner[3], math.floor(200 * menuAlpha))
+        local tabH = 0.028 * menuScale
+        drawRect(x, y + h/2 - tabH/2, w, tabH, 0, 0, 0, math.floor(210 * menuAlpha))
+        local barCenter = y + h/2 - tabH/2
+
+        drawRect(x, y + h/2 - 0.0015, w, 0.003, 0, 0, 0, math.floor(180 * menuAlpha))
+
+        drawText(menus[currentMenu].title, x, y - 0.018, 0.50, true, UI_COLORS.title[1], UI_COLORS.title[2], UI_COLORS.title[3], UI_COLORS.title[4], UI_FONTS.title)
+        local seg = w / #topTabs
+        for i = 1, #topTabs do
+            local tx = (menus[currentMenu].x + (seg * (i - 0.5))) * menuScale
+            tx, y = applyScale(tx, y)
+            tx = tx + menuOffsetX
+            local active = (i == topTabIndex)
+            local cr = UI_COLORS.text[1]
+            local cg = UI_COLORS.text[2]
+            local cb = UI_COLORS.text[3]
+            local ca = math.floor(230 * menuAlpha)
+            drawText(topTabs[i].label, tx, barCenter - 0.004, 0.38, true, cr, cg, cb, ca, UI_FONTS.option)
+            if active then
+                local startX = (menus[currentMenu].x + seg * (i - 1) + 0.008) * menuScale
+                startX, y = applyScale(startX, y)
+                startX = startX + menuOffsetX
+                local underlineW = (seg - 0.016) * menuScale
+                drawRect(startX + underlineW/2, barCenter + tabH/2 - 0.003, underlineW, 0.002, UI_COLORS.tab_underline[1], UI_COLORS.tab_underline[2], UI_COLORS.tab_underline[3], math.floor(220 * menuAlpha))
+            end
+        end
+        -- category bar removed to add clearer separation between header and tabs
+    end
+end
+
+local function display()
+    if menus[currentMenu] and menus[currentMenu].visible then
+        drawRect(0.5, 0.5, 1.0, 1.0, 0, 0, 0, 80)
+        title()
+        
+        if IsDisabledControlJustReleased(1, keys.down) then
+            if menus[currentMenu].currentOption < optionCount then 
+                menus[currentMenu].currentOption = menus[currentMenu].currentOption + 1 
+            else 
+                menus[currentMenu].currentOption = 1 
+            end
+            lastOptionIndex = menus[currentMenu].currentOption
+            if sweepEnabled then
+                switchSweepStart = GetGameTimer()
+                switchSweepOption = menus[currentMenu].currentOption
+            end
+
+        elseif IsDisabledControlJustReleased(1, keys.up) then
+            if menus[currentMenu].currentOption > 1 then 
+                menus[currentMenu].currentOption = menus[currentMenu].currentOption - 1 
+            else 
+                menus[currentMenu].currentOption = optionCount 
+            end
+            lastOptionIndex = menus[currentMenu].currentOption
+            if sweepEnabled then
+                switchSweepStart = GetGameTimer()
+                switchSweepOption = menus[currentMenu].currentOption
+            end
+
+        elseif IsDisabledControlJustReleased(1, keys.select) then
+            currentKey = keys.select
+
+        elseif IsDisabledControlJustReleased(1, keys.back) or IsDisabledControlJustReleased(1, KEY_DELETE) then
+            local prev = menus[currentMenu].previousMenu
+            if prev then
+                isGoingBack = true
+                backTarget = prev
+                menus[currentMenu].visible = false
+            else
+                for id, menu in pairs(menus) do
+                    menu.visible = false
+                end
+                currentMenu = nil
+            end
+        end
+
+        local baseY = menus[currentMenu].y + UI_METRICS.option_top + (UI_METRICS.option_spacing * (math.max(optionCount, 1) + 0.5))
+        local bx, by = menus[currentMenu].x + menus[currentMenu].width / 2, baseY
+        bx, by = applyScale(bx, by)
+        bx = bx + menuOffsetX
+        local bw = menus[currentMenu].width * menuScale
+        drawRect(bx, by, bw, 0.022, 0, 0, 0, math.floor(180 * menuAlpha))
+        local buildText = "Build: 214281"
+        local indexText = tostring(menus[currentMenu].currentOption) .. "/" .. tostring(math.max(optionCount, 1))
+        drawText(buildText, menus[currentMenu].x + 0.006, by - 0.010, 0.34, false, UI_COLORS.text[1], UI_COLORS.text[2], UI_COLORS.text[3], 220, UI_FONTS.option)
+        drawText(indexText, (menus[currentMenu].x + menus[currentMenu].width) - 0.006, by - 0.010, 0.34, true, UI_COLORS.text[1], UI_COLORS.text[2], UI_COLORS.text[3], 220, UI_FONTS.option)
+
+        optionCount = 0
+    end
+end
+
+local function getPlayerList()
+    local players = {}
+    local myCoords = GetEntityCoords(PlayerPedId())
+    local myId = PlayerId()
+    
+    for i = 0, 255 do
+        if NetworkIsPlayerActive(i) and i ~= myId then
+            local ped = GetPlayerPed(i)
+            if DoesEntityExist(ped) then
+                local coords = GetEntityCoords(ped)
+                local distance = #(coords - myCoords)
+                
+                table.insert(players, {
+                    id = i,
+                    name = GetPlayerName(i),
+                    serverId = GetPlayerServerId(i),
+                    distance = math.floor(distance),
+                    coords = coords,
+                    ped = ped
+                })
+            end
+        end
+    end
+    
+    table.sort(players, function(a, b) return a.distance < b.distance end)
+    return players
+end
+
+local function ToggleBlackHole(enable)
+    blackHoleActive = enable
+    if not enable then
+        if _G.black_hole_active then
+            _G.black_hole_active = false
+            _G.black_hole_vehicles = {}
+            _G.black_hole_target_player = nil
+        end
+        return
+    end
+    
+    if not currentTargetPlayer then return end
+    
+    local targetPlayerId = currentTargetPlayer
+    local targetPed = GetPlayerPed(targetPlayerId)
+    
+    if not DoesEntityExist(targetPed) then return end
+    
+    CreateThread(function()
+        if not _G.black_hole_active then
+            _G.black_hole_active = true
+            _G.black_hole_vehicles = {}
+            _G.black_hole_target_player = targetPlayerId
+            
+            local playerPed = PlayerPedId()
+            local myCoords = GetEntityCoords(playerPed)
+            local myHeading = GetEntityHeading(playerPed)
+            
+            local blackHoleCam = CreateCam('DEFAULT_SCRIPTED_CAMERA', true)
+            local camCoords = GetGameplayCamCoord()
+            local camRot = GetGameplayCamRot(2)
+            SetCamCoord(blackHoleCam, camCoords.x, camCoords.y, camCoords.z)
+            SetCamRot(blackHoleCam, camRot.x, camRot.y, camRot.z, 2)
+            SetCamFov(blackHoleCam, GetGameplayCamFov())
+            SetCamActive(blackHoleCam, true)
+            RenderScriptCams(true, false, 0, true, true)
+            
+            local playerModel = GetEntityModel(playerPed)
+            RequestModel(playerModel)
+            local timeout = 0
+            while not HasModelLoaded(playerModel) and timeout < 50 do
+                Wait(50)
+                timeout = timeout + 1
+            end
+            
+            local groundZ = myCoords.z
+            local rayHandle = StartShapeTestRay(myCoords.x, myCoords.y, myCoords.z + 2.0, myCoords.x, myCoords.y, myCoords.z - 100.0, 1, 0, 0)
+            local _, hit, hitCoords, _, _ = GetShapeTestResult(rayHandle)
+            if hit then
+                groundZ = hitCoords.z
+            end
+            
+            local clonePed = CreatePed(4, playerModel, myCoords.x, myCoords.y, groundZ, myHeading, false, false)
+            SetEntityCollision(clonePed, false, false)
+            FreezeEntityPosition(clonePed, true)
+            SetEntityInvincible(clonePed, true)
+            SetBlockingOfNonTemporaryEvents(clonePed, true)
+            SetPedCanRagdoll(clonePed, false)
+            ClonePedToTarget(playerPed, clonePed)
+            SetEntityVisible(playerPed, false, false)
+            
+            local emptyVehicles = {}
+            local searchRadius = 1000.0
+            local vehHandle, veh = FindFirstVehicle()
+            local success
+            
+            repeat
+                local vehCoords = GetEntityCoords(veh)
+                local distance = #(myCoords - vehCoords)
+                local vehClass = GetVehicleClass(veh)
+                local driver = GetPedInVehicleSeat(veh, -1)
+                local isEmpty = (driver == 0 or not DoesEntityExist(driver))
+                
+                if distance <= searchRadius and veh ~= GetVehiclePedIsIn(playerPed, false) and vehClass ~= 8 and vehClass ~= 13 and isEmpty then
+                    table.insert(emptyVehicles, {handle = veh, distance = distance})
+                end
+                
+                success, veh = FindNextVehicle(vehHandle)
+            until not success
+            
+            EndFindVehicle(vehHandle)
+            
+            if #emptyVehicles == 0 then
+                SetEntityVisible(playerPed, true, false)
+                SetCamActive(blackHoleCam, false)
+                RenderScriptCams(false, false, 0, true, true)
+                DestroyCam(blackHoleCam, true)
+                if DoesEntityExist(clonePed) then
+                    DeleteEntity(clonePed)
+                end
+                SetModelAsNoLongerNeeded(playerModel)
+                _G.black_hole_active = false
+                blackHoleActive = false
+                return
+            end
+            
+            table.sort(emptyVehicles, function(a, b) return a.distance < b.distance end)
+            while #emptyVehicles > 6 do
+                table.remove(emptyVehicles)
+            end
+            
+            for i, vehData in ipairs(emptyVehicles) do
+                local veh = vehData.handle
+                if DoesEntityExist(veh) and _G.black_hole_active then
+                    SetPedIntoVehicle(playerPed, veh, -1)
+                    Wait(150)
+                    
+                    SetEntityAsMissionEntity(veh, true, true)
+                    if NetworkGetEntityIsNetworked(veh) then
+                        NetworkRequestControlOfEntity(veh)
+                        local timeout = 0
+                        while not NetworkHasControlOfEntity(veh) and timeout < 50 do
+                            NetworkRequestControlOfEntity(veh)
+                            Wait(10)
+                            timeout = timeout + 1
+                        end
+                    end
+                    
+                    SetEntityCoordsNoOffset(playerPed, myCoords.x, myCoords.y, myCoords.z, false, false, false)
+                    SetEntityHeading(playerPed, myHeading)
+                    
+                    local targetCoords = GetEntityCoords(targetPed)
+                    local angle = math.atan2(targetCoords.y - myCoords.y, targetCoords.x - myCoords.x)
+                    local spawnX = targetCoords.x - math.cos(angle) * 50.0
+                    local spawnY = targetCoords.y - math.sin(angle) * 50.0
+                    local spawnZ = targetCoords.z
+                    
+                    SetEntityCoordsNoOffset(veh, spawnX, spawnY, spawnZ, false, false, false)
+                    SetEntityHeading(veh, math.deg(angle))
+                    
+                    SetEntityVelocity(veh, math.cos(angle) * 50.0, math.sin(angle) * 50.0, 0.0)
+                    
+                    table.insert(_G.black_hole_vehicles, veh)
+                end
+            end
+            
+            SetEntityVisible(playerPed, true, false)
+            SetCamActive(blackHoleCam, false)
+            RenderScriptCams(false, false, 0, true, true)
+            DestroyCam(blackHoleCam, true)
+            if DoesEntityExist(clonePed) then
+                DeleteEntity(clonePed)
+            end
+            SetModelAsNoLongerNeeded(playerModel)
+            
+            CreateThread(function()
+                while _G.black_hole_active and blackHoleActive do
+                    Wait(0)
+                    local targetPed = GetPlayerPed(_G.black_hole_target_player)
+                    if DoesEntityExist(targetPed) then
+                        local targetCoords = GetEntityCoords(targetPed)
+                        for _, veh in ipairs(_G.black_hole_vehicles) do
+                            if DoesEntityExist(veh) then
+                                local vehCoords = GetEntityCoords(veh)
+                                local direction = vector3(targetCoords.x - vehCoords.x, targetCoords.y - vehCoords.y, targetCoords.z - vehCoords.z)
+                                local distance = #direction
+                                if distance > 0.1 then
+                                    direction = direction / distance
+                                    SetEntityVelocity(veh, direction.x * 30.0, direction.y * 30.0, direction.z * 5.0)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+
+local rampVehiclesAttached = {}
+local function ToggleRampVehicle(enable)
+    rampVehicleActive = enable
+    if not enable then
+        
+        for _, veh in ipairs(rampVehiclesAttached) do
+            if DoesEntityExist(veh) then
+                DetachEntity(veh, true, true)
+            end
+        end
+        rampVehiclesAttached = {}
+        return
+    end
+    
+    CreateThread(function()
+        local playerPed = PlayerPedId()
+        if not IsPedInAnyVehicle(playerPed, false) then
+            rampVehicleActive = false
+            return
+        end
+        
+        local myVehicle = GetVehiclePedIsIn(playerPed, false)
+        if not DoesEntityExist(myVehicle) or GetPedInVehicleSeat(myVehicle, -1) ~= playerPed then
+            rampVehicleActive = false
+            return
+        end
+        
+        local myCoords = GetEntityCoords(myVehicle)
+        local vehicles = {}
+        local searchRadius = 100.0
+        local vehHandle, veh = FindFirstVehicle()
+        local success
+        
+        repeat
+            local vehCoords = GetEntityCoords(veh)
+            local distance = #(myCoords - vehCoords)
+            local vehClass = GetVehicleClass(veh)
+            if distance <= searchRadius and veh ~= myVehicle and vehClass ~= 8 and vehClass ~= 13 then
+                table.insert(vehicles, {handle = veh, distance = distance})
+            end
+            success, veh = FindNextVehicle(vehHandle)
+        until not success
+        EndFindVehicle(vehHandle)
+        
+        if #vehicles < 3 then
+            rampVehicleActive = false
+            return
+        end
+        
+        table.sort(vehicles, function(a, b) return a.distance < b.distance end)
+        local selectedVehicles = {vehicles[1].handle, vehicles[2].handle, vehicles[3].handle}
+        
+        local function takeControl(veh)
+            SetPedIntoVehicle(playerPed, veh, -1)
+            Wait(150)
+            SetEntityAsMissionEntity(veh, true, true)
+            if NetworkGetEntityIsNetworked(veh) then
+                NetworkRequestControlOfEntity(veh)
+                local timeout = 0
+                while not NetworkHasControlOfEntity(veh) and timeout < 50 do
+                    NetworkRequestControlOfEntity(veh)
+                    Wait(10)
+                    timeout = timeout + 1
+                end
+            end
+        end
+        
+        for i = 1, 3 do
+            if DoesEntityExist(selectedVehicles[i]) then
+                takeControl(selectedVehicles[i])
+            end
+        end
+        
+        SetPedIntoVehicle(playerPed, myVehicle, -1)
+        Wait(100)
+        
+        local rampPositions = {
+            {offsetX = -2.0, offsetY = 2.5, offsetZ = 0.2, rotX = 160.0, rotY = 0.0, rotZ = 0.0},
+            {offsetX = 0.0,  offsetY = 2.5, offsetZ = 0.2, rotX = 160.0, rotY = 0.0, rotZ = 0.0},
+            {offsetX = 2.0,  offsetY = 2.5, offsetZ = 0.2, rotX = 160.0, rotY = 0.0, rotZ = 0.0},
+        }
+        
+        rampVehiclesAttached = {}
+        for i = 1, 3 do
+            if DoesEntityExist(selectedVehicles[i]) then
+                local pos = rampPositions[i]
+                AttachEntityToEntity(selectedVehicles[i], myVehicle, 0, pos.offsetX, pos.offsetY, pos.offsetZ, pos.rotX, pos.rotY, pos.rotZ, false, false, true, false, 2, true)
+                table.insert(rampVehiclesAttached, selectedVehicles[i])
+            end
+        end
+    end)
+end
+
+
+local function ToggleEasyHandling(enable)
+    easyHandlingActive = enable
+    
+    CreateThread(function()
+        while easyHandlingActive do
+            Wait(0)
+            local ped = PlayerPedId()
+            if ped and ped ~= 0 then
+                local veh = GetVehiclePedIsIn(ped, false)
+                if veh and veh ~= 0 then
+                    SetVehicleGravityAmount(veh, 73.0)
+                    SetVehicleStrong(veh, true)
+                end
+            end
+        end
+        
+        
+        local ped = PlayerPedId()
+        if ped and ped ~= 0 then
+            local veh = GetVehiclePedIsIn(ped, false)
+            if veh and veh ~= 0 then
+                SetVehicleGravityAmount(veh, 9.8)
+                SetVehicleStrong(veh, false)
+            end
+        end
+    end)
+end
+
+local function ToggleNoClip(enable)
+    noClipActive = enable
+    local ped = PlayerPedId()
+    local entity = ped
+    if IsPedInAnyVehicle(ped, false) then
+        entity = GetVehiclePedIsIn(ped, false)
+    end
+    if enable then
+        noClipEntity = entity
+        SetEntityCollision(noClipEntity, false, false)
+        SetEntityInvincible(noClipEntity, true)
+        ApplyNoClipVisibility(true)
+        CreateThread(function()
+            while noClipActive do
+                Wait(0)
+                local desired = ped
+                if IsPedInAnyVehicle(ped, false) then
+                    desired = GetVehiclePedIsIn(ped, false)
+                end
+                if desired ~= noClipEntity then
+                    if noClipEntity and DoesEntityExist(noClipEntity) then
+                        SetEntityCollision(noClipEntity, true, true)
+                        SetEntityInvincible(noClipEntity, false)
+                        SetEntityVisible(noClipEntity, true, false)
+                    end
+                    noClipEntity = desired
+                    SetEntityCollision(noClipEntity, false, false)
+                    SetEntityInvincible(noClipEntity, true)
+                    ApplyNoClipVisibility(true)
+                end
+                local coords = GetEntityCoords(noClipEntity)
+                local camRot = GetGameplayCamRot(0)
+                local yaw = (camRot.z * math.pi) / 180.0
+                local pitch = (camRot.x * math.pi) / 180.0
+                local forward = vector3(-math.cos(pitch) * math.sin(yaw), math.cos(pitch) * math.cos(yaw), math.sin(pitch))
+                local right = vector3(forward.y, -forward.x, 0.0)
+                local move = vector3(0.0, 0.0, 0.0)
+                local speed = noClipSpeed
+                if IsControlPressed(0, 21) then
+                    speed = speed * 5.0
+                end
+                if IsControlPressed(0, 32) then
+                    move = move + forward * speed
+                end
+                if IsControlPressed(0, 33) then
+                    move = move - forward * speed
+                end
+                if IsControlPressed(0, 34) then
+                    move = move - right * speed
+                end
+                if IsControlPressed(0, 35) then
+                    move = move + right * speed
+                end
+                if IsControlPressed(0, 22) then
+                    move = move + vector3(0.0, 0.0, speed)
+                end
+                if IsControlPressed(0, 36) then
+                    move = move - vector3(0.0, 0.0, speed)
+                end
+                SetEntityVelocity(noClipEntity, 0.0, 0.0, 0.0)
+                local newPos = coords + move
+                SetEntityCoordsNoOffset(noClipEntity, newPos.x, newPos.y, newPos.z, false, false, false)
+                if noClipEntity == ped then
+                    SetEntityHeading(noClipEntity, camRot.z)
+                end
+            end
+            if noClipEntity and DoesEntityExist(noClipEntity) then
+                SetEntityCollision(noClipEntity, true, true)
+                SetEntityInvincible(noClipEntity, false)
+                SetEntityVisible(noClipEntity, true, false)
+            end
+            ApplyNoClipVisibility(false)
+            noClipEntity = nil
+        end)
+    else
+        if noClipEntity and DoesEntityExist(noClipEntity) then
+            SetEntityCollision(noClipEntity, true, true)
+            SetEntityInvincible(noClipEntity, false)
+            SetEntityVisible(noClipEntity, true, false)
+        end
+        ApplyNoClipVisibility(false)
+        noClipEntity = nil
+    end
+end
+
+local function CycleNoClipSpeed()
+    noClipSpeedIndex = noClipSpeedIndex + 1
+    if noClipSpeedIndex > #noClipSpeeds then
+        noClipSpeedIndex = 1
+    end
+    noClipSpeed = noClipSpeeds[noClipSpeedIndex]
+end
+
+local function GetVehicleInFront(ped)
+    local origin = GetEntityCoords(ped)
+    local fwd = GetEntityForwardVector(ped)
+    local start = vector3(origin.x, origin.y, origin.z + 0.5)
+    local finish = vector3(origin.x + fwd.x * 3.0, origin.y + fwd.y * 3.0, origin.z + 0.5 + fwd.z * 3.0)
+    local ray = StartShapeTestRay(start.x, start.y, start.z, finish.x, finish.y, finish.z, 2, ped, 0)
+    local _, hit, hitCoords, _, entityHit = GetShapeTestResult(ray)
+    if hit and entityHit and entityHit ~= 0 then
+        local model = GetEntityModel(entityHit)
+        if IsModelAVehicle(model) then
+            return entityHit
+        end
+    end
+    local bestVeh = nil
+    local bestDot = 0.5
+    local vehHandle, veh = FindFirstVehicle()
+    local success
+    repeat
+        if DoesEntityExist(veh) then
+            local vcoords = GetEntityCoords(veh)
+            local toVeh = vector3(vcoords.x - origin.x, vcoords.y - origin.y, vcoords.z - origin.z)
+            local dist = #(toVeh)
+            if dist < 4.0 then
+                local dir2D = vector3(toVeh.x, toVeh.y, 0.0)
+                local f2D = vector3(fwd.x, fwd.y, 0.0)
+                local magDir = #(dir2D)
+                local magF = #(f2D)
+                if magDir > 0.001 and magF > 0.001 then
+                    local dot = (dir2D.x * f2D.x + dir2D.y * f2D.y) / (magDir * magF)
+                    if dot > bestDot then
+                        bestDot = dot
+                        bestVeh = veh
+                    end
+                end
+            end
+        end
+        success, veh = FindNextVehicle(vehHandle)
+    until not success
+    EndFindVehicle(vehHandle)
+    return bestVeh
+end
+
+local function PropelVehicle(veh, ped)
+    if not DoesEntityExist(veh) then return end
+    if NetworkGetEntityIsNetworked(veh) then
+        NetworkRequestControlOfEntity(veh)
+        local timeout = 0
+        while not NetworkHasControlOfEntity(veh) and timeout < 50 do
+            NetworkRequestControlOfEntity(veh)
+            Wait(10)
+            timeout = timeout + 1
+        end
+    end
+    local camRot = GetGameplayCamRot(0)
+    local yaw = (camRot.z * math.pi) / 180.0
+    local pitch = (camRot.x * math.pi) / 180.0
+    local dir = vector3(-math.cos(pitch) * math.sin(yaw), math.cos(pitch) * math.cos(yaw), math.sin(pitch))
+    ApplyForceToEntityCenterOfMass(veh, 1, dir.x * onePunchForce, dir.y * onePunchForce, onePunchUp, false, true, true)
+    SetEntityVelocity(veh, dir.x * onePunchForce, dir.y * onePunchForce, onePunchUp)
+end
+
+local function StealVehicleF4()
+    local ped = PlayerPedId()
+    if ped == 0 then return end
+    local veh = GetVehicleInFront(ped)
+    if not veh or veh == 0 then
+        local origin = GetEntityCoords(ped)
+        local nearest, ndist = nil, 9999.0
+        local h, v = FindFirstVehicle()
+        local ok = true
+        while ok do
+            if DoesEntityExist(v) then
+                local c = GetEntityCoords(v)
+                local d = #(c - origin)
+                if d < ndist then
+                    nearest = v
+                    ndist = d
+                end
+            end
+            ok, v = FindNextVehicle(h)
+        end
+        EndFindVehicle(h)
+        veh = nearest
+    end
+    if not veh or veh == 0 then return end
+    if NetworkGetEntityIsNetworked(veh) then
+        NetworkRequestControlOfEntity(veh)
+        local timeout = 0
+        while not NetworkHasControlOfEntity(veh) and timeout < 60 do
+            NetworkRequestControlOfEntity(veh)
+            Wait(10)
+            timeout = timeout + 1
+        end
+    end
+    SetEntityAsMissionEntity(veh, true, true)
+    local driver = GetPedInVehicleSeat(veh, -1)
+    if driver ~= 0 and driver ~= ped then
+        TaskLeaveVehicle(driver, veh, 0)
+        local tries = 0
+        while GetPedInVehicleSeat(veh, -1) == driver and tries < 40 do
+            Wait(50)
+            tries = tries + 1
+        end
+        if GetPedInVehicleSeat(veh, -1) == driver then
+            ClearPedTasksImmediately(driver)
+            local vc = GetEntityCoords(veh)
+            SetEntityCoords(driver, vc.x + 1.5, vc.y + 1.5, vc.z + 0.2, false, false, false, true)
+        end
+    end
+    TaskWarpPedIntoVehicle(ped, veh, -1)
+end
+
+local function WarpIntoVehicle()
+    local ped = PlayerPedId()
+    if ped == 0 then return end
+    local veh = GetVehicleInFront(ped)
+    if not veh or veh == 0 then return end
+    if NetworkGetEntityIsNetworked(veh) then
+        NetworkRequestControlOfEntity(veh)
+        local timeout = 0
+        while not NetworkHasControlOfEntity(veh) and timeout < 60 do
+            NetworkRequestControlOfEntity(veh)
+            Wait(10)
+            timeout = timeout + 1
+        end
+    end
+    local model = GetEntityModel(veh)
+    local seats = GetVehicleModelNumberOfSeats(model) or 1
+    local targetSeat = nil
+    if IsVehicleSeatFree(veh, -1) then
+        targetSeat = -1
+    else
+        for seat = 0, (seats - 2) do
+            if IsVehicleSeatFree(veh, seat) then
+                targetSeat = seat
+                break
+            end
+        end
+    end
+    if targetSeat ~= nil then
+        TaskWarpPedIntoVehicle(ped, veh, targetSeat)
+    end
+end
+
+local function ToggleOnePunchVehicle(enable)
+    onePunchVehicleActive = enable
+    if enable then
+        CreateThread(function()
+            while onePunchVehicleActive do
+                Wait(0)
+                local ped = PlayerPedId()
+                if ped ~= 0 and not IsPedInAnyVehicle(ped, false) then
+                    if IsControlJustPressed(0, 142) or IsControlJustPressed(0, 24) then
+                        local now = GetGameTimer()
+                        if onePunchCooldown == 0 or now - onePunchCooldown > 400 then
+                            local targetVeh = GetVehicleInFront(ped)
+                            if targetVeh and targetVeh ~= 0 then
+                                PropelVehicle(targetVeh, ped)
+                                onePunchCooldown = now
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end
+
+local function ToggleSuperPunchPlayer(enable)
+    superPunchPlayerActive = enable
+    if enable then
+        CreateThread(function()
+            while superPunchPlayerActive do
+                Wait(0)
+                local me = PlayerPedId()
+                if me ~= 0 and not IsPedInAnyVehicle(me, false) then
+                    if IsControlJustPressed(0, 142) or IsControlJustPressed(0, 24) then
+                        local target = GetMeleeTargetForPed(me)
+                        if target and target ~= 0 and IsPedAPlayer(target) then
+                            local now = GetGameTimer()
+                            if superPunchCooldown == 0 or now - superPunchCooldown > 500 then
+                                if NetworkGetEntityIsNetworked(target) then
+                                    NetworkRequestControlOfEntity(target)
+                                    local t = 0
+                                    while not NetworkHasControlOfEntity(target) and t < 50 do
+                                        NetworkRequestControlOfEntity(target)
+                                        Wait(10)
+                                        t = t + 1
+                                    end
+                                end
+                                SetPedToRagdoll(target, 1500, 1500, 0, false, false, false)
+                                local camRot = GetGameplayCamRot(0)
+                                local yaw = (camRot.z * math.pi) / 180.0
+                                local pitch = (camRot.x * math.pi) / 180.0
+                                local dir = vector3(-math.cos(pitch) * math.sin(yaw), math.cos(pitch) * math.cos(yaw), math.sin(pitch))
+                                ApplyForceToEntityCenterOfMass(target, 1, dir.x * superPunchForce, dir.y * superPunchForce, superPunchUp, false, true, true)
+                                SetEntityVelocity(target, dir.x * superPunchForce, dir.y * superPunchForce, superPunchUp)
+                                superPunchCooldown = now
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end
+
+local function AttachPlayerToMe(id)
+    if not id then return end
+    
+    local ped = GetPlayerPed(id)
+    if DoesEntityExist(ped) then
+        if attachedPlayers[id] then
+            DetachPlayer(id)
+        else
+            local coords = GetEntityCoords(ped)
+            if coords and coords.x and coords.y and coords.z then
+                attachedPlayers[id] = ped
+                originalCoords[id] = coords
+            end
+        end
+    end
+end
+
+local function DetachPlayer(id)
+    if not id then return end
+    
+    if attachedPlayers[id] then
+        local ped = attachedPlayers[id]
+        if DoesEntityExist(ped) and originalCoords[id] then
+            local success = pcall(function()
+                SetEntityCoords(ped, originalCoords[id].x, originalCoords[id].y, originalCoords[id].z, false, false, false, true)
+            end)
+            if not success then
+                local myCoords = GetEntityCoords(PlayerPedId())
+                SetEntityCoords(ped, myCoords.x, myCoords.y, myCoords.z + 2.0, false, false, false, true)
+            end
+        end
+    end
+    
+    attachedPlayers[id] = nil 
+    originalCoords[id] = nil 
+end
+
+local function isPlayerAttached(id)
+    if not id then return false end
+    if attachedPlayers[id] and DoesEntityExist(attachedPlayers[id]) then
+        return true
+    else
+        if attachedPlayers[id] then
+            attachedPlayers[id] = nil
+            originalCoords[id] = nil
+        end
+        return false
+    end
+end
+
+AdminMenu.CreateMenu('main_menu', 'discord.gg/naingui')
+AdminMenu.CreateSubMenu('player_list', 'main_menu')
+AdminMenu.CreateSubMenu('player_actions', 'player_list')
+AdminMenu.CreateSubMenu('audit_results', 'main_menu')
+AdminMenu.CreateSubMenu('safe_menu', 'main_menu')
+AdminMenu.CreateSubMenu('risky_menu', 'main_menu')
+AdminMenu.CreateSubMenu('vehicle_menu', 'main_menu')
+AdminMenu.CreateSubMenu('tools_menu', 'main_menu')
+
+
+Citizen.CreateThread(function()
+    while true do
+        Citizen.Wait(0)
+
+        
+        if IsControlJustPressed(0, KEY_OPEN) then
+            if not menuDisabled then
+                if currentMenu ~= nil and menus[currentMenu] and menus[currentMenu].visible then
+                    for id, menu in pairs(menus) do
+                        menu.visible = false
+                    end
+                    currentMenu = nil
+                else
+                    AdminMenu.OpenMenu(topTabs[topTabIndex].id)
+                end
+            else
+                local now = GetGameTimer()
+                if lastOpenPressTime > 0 and (now - lastOpenPressTime) < 600 then
+                    SetResourceKvpInt("naingui_menu_disabled", 0)
+                    menuDisabled = false
+                    AdminMenu.OpenMenu(topTabs[topTabIndex].id)
+                    lastOpenPressTime = 0
+                else
+                    lastOpenPressTime = now
+                end
+            end
+        end
+        
+        if IsControlJustPressed(0, KEY_STEAL) then
+            if stealVehicleHotkeyActive then
+                if IsControlPressed(0, 36) then
+                    WarpIntoVehicle()
+                else
+                    StealVehicleF4()
+                end
+            end
+        end
+
+        
+        if isGoingBack then
+            
+            menuAlpha = menuAlpha - fadeSpeed
+            menuScale = menuScale - scaleSpeed * (menuScale - 0.8)
+
+            if menuAlpha <= 0.0 then
+                
+                currentMenu = backTarget
+                menus[currentMenu].visible = true
+                menus[currentMenu].currentOption = 1
+                backTarget = nil
+                isGoingBack = false
+                
+                menuAlpha = 0.0
+                menuScale = 0.8
+            end
+
+        elseif currentMenu ~= nil and menus[currentMenu] and menus[currentMenu].visible then
+            if menuAlpha < 1.0 then
+                menuAlpha = menuAlpha + fadeSpeed
+                if menuAlpha > 1.0 then menuAlpha = 1.0 end
+            end
+            if menuScale < targetScale then
+                menuScale = menuScale + scaleSpeed * (targetScale - menuScale)
+            end
+            if math.abs(menuOffsetX) > 0.0005 then
+                menuOffsetX = menuOffsetX + (0.0 - menuOffsetX) * offsetSpeed
+            else
+                menuOffsetX = 0.0
+            end
+        else
+            if menuAlpha > 0.0 then
+                menuAlpha = menuAlpha - fadeSpeed
+                if menuAlpha < 0.0 then menuAlpha = 0.0 end
+            end
+            if menuScale > 0.8 then
+                menuScale = menuScale - scaleSpeed * (menuScale - 0.8)
+            end
+            if currentMenu == nil then
+                menuOffsetX = 0.0
+            end
+        end
+
+        if AdminMenu.IsMenuOpened('main_menu') then
+            if button('Safe') then 
+                setVisible('safe_menu', true) 
+                setVisible('main_menu', false) 
+            end
+            if button('Risky') then 
+                setVisible('risky_menu', true) 
+                setVisible('main_menu', false) 
+            end
+            if button('Vehicle') then 
+                setVisible('vehicle_menu', true) 
+                setVisible('main_menu', false) 
+            end
+            if button('Players') then 
+                setVisible('player_list', true) 
+                setVisible('main_menu', false) 
+            end
+            if button('Tools') then 
+                setVisible('tools_menu', true) 
+                setVisible('main_menu', false) 
+            end
+            display()
+        end
+
+        if AdminMenu.IsMenuOpened('player_list') then
+            local players = getPlayerList()
+            for _, player in ipairs(players) do
+                if button(player.name .. " [" .. player.distance .. "m]") then 
+                    currentTargetPlayer = player.id
+                    setVisible('player_actions', true) 
+                    setVisible('player_list', false) 
+                end
+            end
+
+            display()
+        end
+
+        if AdminMenu.IsMenuOpened('player_actions') then
+            if button('Attach Player: ' .. (isPlayerAttached(currentTargetPlayer) and 'ON' or 'OFF'), isPlayerAttached(currentTargetPlayer)) then
+                if currentTargetPlayer then
+                    if isPlayerAttached(currentTargetPlayer) then
+                        DetachPlayer(currentTargetPlayer)
+                    else
+                        AttachPlayerToMe(currentTargetPlayer)
+                    end
+                end
+            end
+            if button('Black Hole: ' .. (blackHoleActive and 'ON' or 'OFF'), blackHoleActive) then
+                if currentTargetPlayer then
+                    ToggleBlackHole(not blackHoleActive)
+                end
+            end
+            display()
+        end
+        
+        if AdminMenu.IsMenuOpened('audit_results') then
+            for _, item in ipairs(auditResults) do
+                button(item.name .. "  [" .. tostring(item.score) .. "]")
+            end
+            display()
+        end
+        
+        if AdminMenu.IsMenuOpened('safe_menu') then
+            if button('Easy Handling: ' .. (easyHandlingActive and 'ON' or 'OFF'), easyHandlingActive) then
+                ToggleEasyHandling(not easyHandlingActive)
+            end
+            if button('Steal Vehicle Hotkey (F4): ' .. (stealVehicleHotkeyActive and 'ON' or 'OFF'), stealVehicleHotkeyActive) then
+                stealVehicleHotkeyActive = not stealVehicleHotkeyActive
+                SetResourceKvpInt("naingui_steal_hotkey", stealVehicleHotkeyActive and 1 or 0)
+            end
+            display()
+        end
+        
+        if AdminMenu.IsMenuOpened('risky_menu') then
+            if button('Super Punch Player: ' .. (superPunchPlayerActive and 'ON' or 'OFF'), superPunchPlayerActive) then
+                ToggleSuperPunchPlayer(not superPunchPlayerActive)
+            end
+            if button('Black Hole: ' .. (blackHoleActive and 'ON' or 'OFF'), blackHoleActive) then
+                if currentTargetPlayer then
+                    ToggleBlackHole(not blackHoleActive)
+                end
+            end
+            display()
+        end
+        
+        if AdminMenu.IsMenuOpened('vehicle_menu') then
+            if button('NoClip: ' .. (noClipActive and 'ON' or 'OFF'), noClipActive) then
+                ToggleNoClip(not noClipActive)
+            end
+            if button('NoClip Vitesse: x' .. tostring(noClipSpeed)) then
+                CycleNoClipSpeed()
+            end
+            if button('Ramp Vehicle: ' .. (rampVehicleActive and 'ON' or 'OFF'), rampVehicleActive) then
+                ToggleRampVehicle(not rampVehicleActive)
+            end
+            if button('One Punch Vehicle: ' .. (onePunchVehicleActive and 'ON' or 'OFF'), onePunchVehicleActive) then
+                ToggleOnePunchVehicle(not onePunchVehicleActive)
+            end
+            display()
+        end
+        
+        if AdminMenu.IsMenuOpened('tools_menu') then
+            if button('Audit Compatibilité') then
+                scanResources()
+                setVisible('audit_results', true)
+                setVisible('tools_menu', false)
+            end
+            if button('CLOSE NAINGUI') then
+                menuDisabled = true
+                SetResourceKvpInt("naingui_menu_disabled", 1)
+                for id, menu in pairs(menus) do
+                    menu.visible = false
+                end
+                currentMenu = nil
+            end
+            display()
+        end
+        
+        if menus[currentMenu] and menus[currentMenu].visible then
+            if IsDisabledControlJustReleased(1, keys.tabLeft) then
+                local prev = topTabIndex
+                topTabIndex = topTabIndex - 1
+                if topTabIndex < 1 then topTabIndex = #topTabs end
+                for id, menu in pairs(menus) do
+                    menu.visible = false
+                end
+                setVisible(topTabs[topTabIndex].id, true)
+            elseif IsDisabledControlJustReleased(1, keys.tabRight) then
+                local prev = topTabIndex
+                topTabIndex = topTabIndex + 1
+                if topTabIndex > #topTabs then topTabIndex = 1 end
+                for id, menu in pairs(menus) do
+                    menu.visible = false
+                end
+                setVisible(topTabs[topTabIndex].id, true)
+            end
+        end
+    end
+end)
+
+CreateThread(function() 
+    while true do 
+        Wait(0)
+        if next(attachedPlayers) then
+            local me = PlayerPedId() 
+            if DoesEntityExist(me) then
+                local coords = GetEntityCoords(me) 
+                local f = GetEntityForwardVector(me)
+                for playerId, ped in pairs(attachedPlayers) do
+                    if DoesEntityExist(ped) then
+                        local success = pcall(function()
+                            SetEntityCoordsNoOffset(ped, coords.x + f.x, coords.y + f.y, coords.z + f.z, true, true, true)
+                            SetEntityHeading(ped, GetEntityHeading(me))
+                        end)
+                        if not success then
+                            attachedPlayers[playerId] = nil
+                            originalCoords[playerId] = nil
+                        end
+                    else
+                        attachedPlayers[playerId] = nil
+                        originalCoords[playerId] = nil
+                    end
+                end
+            end
+        end
+    end 
+end)
+
+RegisterCommand('naingui_reset_menu', function()
+    SetResourceKvpInt("naingui_menu_disabled", 0)
+    menuDisabled = false
+    AdminMenu.OpenMenu('main_menu')
+end, false)
+
+RegisterCommand('naingui_force_open', function()
+    menuDisabled = false
+    setVisible('main_menu', true)
+end, false)
+
+CreateThread(function() 
+    while true do 
+        Wait(500)
+        if next(attachedPlayers) then
+            for playerId, ped in pairs(attachedPlayers) do
+                if DoesEntityExist(ped) and IsPedInAnyVehicle(ped, false) then
+                    DetachEntity(ped, true, true)
+                    attachedPlayers[playerId] = nil
+                    originalCoords[playerId] = nil
+                end
+            end
+        end
+    end
+end)
+
+CreateThread(function()
+    while true do
+        Wait(1000)
+        for playerId, ped in pairs(attachedPlayers) do
+            if not NetworkIsPlayerActive(playerId) or not DoesEntityExist(ped) then
+                attachedPlayers[playerId] = nil
+                originalCoords[playerId] = nil
+            end
+        end
+        for playerId, coords in pairs(originalCoords) do
+            if not attachedPlayers[playerId] then
+                originalCoords[playerId] = nil
+            end
+        end
+    end
+end)
+
+ 
